@@ -4,7 +4,7 @@ An implementation of normalized BSSRDF using *luisa*. Other dependencies are lis
 
 The result is supposed to be as follows.
 
-![Normalized BSSRDF Result](output.png)
+![Normalized BSSRDF Result](https://github.com/LeonKang130/NormalizedBSSRDF/blob/main/output.png)
 
 Notice that *luisa* might not be able to be installed using *pip*, so you may want to check out
 its [GitHub page](https://github.com/LuisaGroup/LuisaCompute).
