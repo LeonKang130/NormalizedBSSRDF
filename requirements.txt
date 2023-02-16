@@ -1,0 +1,5 @@
+dearpygui
+numpy
+matplotlib
+tinyobjloader
+luisa
