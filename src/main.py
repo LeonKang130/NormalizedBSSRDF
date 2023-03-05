@@ -136,32 +136,33 @@ def generate_ray(p, resolution):
 @luisa.func
 def cosine_sample_hemisphere(u: float2):
     r = sqrt(u.x)
-    phi = 2.0 * 3.1415926 * u.y
+    phi = 2.0 * math.pi * u.y
     return make_float3(r * cos(phi), r * sin(phi), sqrt(1.0 - u.x))
 
 
 @luisa.func
 def normalized_bssrdf(d: float, r: float) -> float:
-    ratio = r / d
-    return (exp(-ratio) + exp(-3 * ratio)) / (8 * math.pi * r * d)
+    exponent = exp(-r / (3.0 * d))
+    return (exponent + exponent * exponent * exponent) / (8 * math.pi * r * d)
 
 
 @luisa.func
 def pdf_disk(d: float, r: float) -> float:
-    ratio = r / d
     c = cdf_disk(d, r)
-    return (exp(-ratio) + exp(-3 * ratio)) * abs(c * log(c)) / (8 * math.pi * r * d)
+    exponent = exp(-r / (3.0 * d))
+    return (exponent + exponent * exponent * exponent) * abs(c * log(c)) / (8 * math.pi * r * d)
 
 
 @luisa.func
 def cdf_disk(d: float, r: float) -> float:
-    return 1.0 - 0.25 * exp(-r / d) - 0.75 * exp(-r / (3.0 * d))
+    exponent = exp(-r / (3.0 * d))
+    return 1.0 - 0.25 * exponent * exponent * exponent - 0.75 * exponent
 
 
 @luisa.func
 def invert_cdf_disk(d: float, x: float) -> float:
     q = 4.0 * (x - 1.0)
-    x = pow(-0.5 * q + sqrt((0.5 * q) ** 2 + 1), 1 / 3) - pow(0.5 * q + sqrt((0.5 * q) ** 2 + 1), 1 / 3)
+    x = pow(-0.5 * q + sqrt(0.25 * q * q + 1), 1 / 3) - pow(0.5 * q + sqrt(0.25 * q * q + 1), 1 / 3)
     return -3.0 * log(x) * d
 
 
@@ -397,29 +398,22 @@ def hdr2ldr_kernel(hdr_image, ldr_image, scale: float):
     ldr_image.write(coord, make_float4(ldr, 1.0))
 
 
-# luisa.lcapi.log_level_error()
-
 res = 1024, 1024
 image = luisa.Texture2D(*res, 4, float)
 accum_image = luisa.Texture2D(*res, 4, float)
 ldr_image = luisa.Texture2D(*res, 4, float)
 arr = np.zeros([*res, 4], dtype=np.float32)
-
 frame_rate = FrameRate(10)
 w = Window("Normalized BSSRDF", res, resizable=False, frame_rate=True)
 w.set_background(arr, res)
 dpg.draw_image("background", (0, 0), res, parent="viewport_draw")
-
 clear_kernel(accum_image, dispatch_size=[*res, 1])
-
-t0 = time.time()
 frame_index = 0
-sample_per_pass = 16
+sample_per_pass = 32
 
 
 def update():
     global frame_index, arr
-    t = time.time() - t0
     for i in range(sample_per_pass):
         raytracing_kernel(image, accel, make_int2(
             *res), frame_index, dispatch_size=(*res, 1))
@@ -429,10 +423,6 @@ def update():
     ldr_image.copy_to(arr)
     frame_rate.record(sample_per_pass)
     w.update_frame_rate(frame_rate.report())
-    # print(frame_rate.report())
-
-
-#     # w.update_frame_rate(dpg.get_frame_rate())
 
 
 w.run(update)
