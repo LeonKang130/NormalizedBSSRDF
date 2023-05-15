@@ -3,7 +3,7 @@
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$" />
     <content url="file://D:/LuisaCompute/build_release/bin" />
-    <orderEntry type="jdk" jdkName="C:\ProgramData\Anaconda3" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="D:\Anaconda" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
