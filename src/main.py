@@ -1,114 +1,43 @@
-import math
-import time
+from __future__ import annotations
 
-import dearpygui.dearpygui as dpg
-import numpy as np
-from matplotlib import pyplot as plt
+import json
+import math
+import sys
 
 import luisa
-from luisa.accel import make_ray, offset_ray_origin
-from luisa.framerate import FrameRate
+import numba
+import numpy as np
+import tinyobjloader
+from luisa import RandomSampler
+from luisa.accel import offset_ray_origin
 from luisa.mathtypes import *
-from luisa.util import RandomSampler
-from luisa.window import Window
-from scene import parse_scene
+from matplotlib import pyplot as plt
 
-render_scene = parse_scene("./test.sc")
-
-SIGMA_A = make_float3(*render_scene.material.sigma_a)
-SIGMA_S = make_float3(*render_scene.material.sigma_s)
-G = render_scene.material.g
-ETA = render_scene.material.eta
-print(f"sigma_a: {SIGMA_A}")
-print(f"sigma_s: {SIGMA_S}")
-print(f"g: {G}")
-print(f"eta: {ETA}")
-EFFECTIVE_SIGMA_S = SIGMA_S * (1.0 - G)
-REDUCED_SIGMA_T = EFFECTIVE_SIGMA_S + SIGMA_A
-EFFECTIVE_ALPHA = EFFECTIVE_SIGMA_S / REDUCED_SIGMA_T
-FRESNEL_DIFFUSE = -1.440 / (ETA * ETA) + 0.710 / ETA + 0.668 + 0.0636 * ETA
-A = (1.0 + FRESNEL_DIFFUSE) / (1.0 - FRESNEL_DIFFUSE)
-print(f"A: {A}")
-DIFFUSE_ALBEDO = 0.5 * EFFECTIVE_ALPHA * (1.0 + make_float3(
-    math.exp(-4.0 / 3.0 * A * math.sqrt(3.0 * (1.0 - EFFECTIVE_ALPHA.x))),
-    math.exp(-4.0 / 3.0 * A * math.sqrt(3.0 * (1.0 - EFFECTIVE_ALPHA.y))),
-    math.exp(-4.0 / 3.0 * A * math.sqrt(3.0 * (1.0 - EFFECTIVE_ALPHA.z))))
-                                          ) * make_float3(
-    math.exp(-math.sqrt(3.0 * (1.0 - EFFECTIVE_ALPHA.x))),
-    math.exp(-math.sqrt(3.0 * (1.0 - EFFECTIVE_ALPHA.y))),
-    math.exp(-math.sqrt(3.0 * (1.0 - EFFECTIVE_ALPHA.z)))
-)
-print(f"diffuse albedo: {DIFFUSE_ALBEDO}")
-SIGMA_TR = make_float3(
-    math.sqrt(3.0 * (1.0 - EFFECTIVE_ALPHA.x)),
-    math.sqrt(3.0 * (1.0 - EFFECTIVE_ALPHA.y)),
-    math.sqrt(3.0 * (1.0 - EFFECTIVE_ALPHA.z))
-) * REDUCED_SIGMA_T
-L_DIFFUSE = 1.0 / SIGMA_TR
-print(f"l diffuse: {L_DIFFUSE}")
-D = L_DIFFUSE / (3.5 + 100 * make_float3(
-    (DIFFUSE_ALBEDO.x - 0.33) ** 4,
-    (DIFFUSE_ALBEDO.y - 0.33) ** 4,
-    (DIFFUSE_ALBEDO.z - 0.33) ** 4
-))
-print(f"d: {D}")
-CAMERA_ORIGIN = make_float3(0.0, 1.0, 8.0)
-CAMERA_LOOK_AT = make_float3(0.0, 0.5, 0.0)
-CAMERA_FOV = 20.0
-
-MAX_DEPTH = 24
-
-luisa.init()
-heap = luisa.BindlessArray()
-vertex_buffer = luisa.Buffer(len(render_scene.vertex_arr), float3)
-vertex_arr = np.array([[*vertex, 0.0]
-                       for vertex in render_scene.vertex_arr], dtype=np.float32)
-vertex_buffer.copy_from(vertex_arr)
-normal_buffer = luisa.Buffer(len(render_scene.normal_arr), float3)
-normal_arr = np.array([[*normal, 0.0]
-                       for normal in render_scene.normal_arr], dtype=np.float32)
-normal_buffer.copy_from(normal_arr)
-emission_buffer = luisa.Buffer(len(render_scene.emissions), float3)
-emission_arr = np.array([[*emission, 0.0]
-                         for emission in render_scene.emissions], dtype=np.float32)
-emission_buffer.copy_from(emission_arr)
-
-accel = luisa.Accel()
-mesh_num = len(render_scene.meshes)
-for mesh_cnt, mesh in enumerate(render_scene.meshes):
-    vertex_index_buffer = luisa.Buffer(len(mesh.vertex_indices), int)
-    vertex_index_buffer.copy_from(
-        np.array(mesh.vertex_indices, dtype=np.int32))
-    heap.emplace(mesh_cnt, vertex_index_buffer)
-    accel.add(luisa.Mesh(vertex_buffer, vertex_index_buffer))
-    normal_index_buffer = luisa.Buffer(len(mesh.normal_indices), int)
-    normal_index_buffer.copy_from(
-        np.array(mesh.normal_indices, dtype=np.int32))
-    heap.emplace(mesh_cnt + mesh_num, normal_index_buffer)
-accel.update()
-heap.update()
-
+DeviceDirectionLight = luisa.StructType(direction=float3, emission=float3)
+DevicePointLight = luisa.StructType(position=float3, emission=float3)
+DeviceSurfaceLight = luisa.StructType(emission=float3)
 Onb = luisa.StructType(tangent=float3, binormal=float3, normal=float3)
 
 
 @luisa.func
-def to_world(self, v: float3):
+def to_world(self, v):
     return v.x * self.tangent + v.y * self.binormal + v.z * self.normal
 
 
+@luisa.func
+def rotate(self, phi):
+    tangent = self.tangent * cos(phi) - self.binormal * sin(phi)
+    binormal = self.tangent * sin(phi) + self.binormal * cos(phi)
+    self.tangent = tangent
+    self.binormal = binormal
+
+
 Onb.add_method(to_world, "to_world")
+Onb.add_method(rotate, "rotate")
 
 
 @luisa.func
-def linear_to_srgb(x: float3):
-    return clamp(select(1.055 * x ** (1.0 / 2.4) - 0.055,
-                        12.92 * x,
-                        x <= 0.00031308),
-                 0.0, 1.0)
-
-
-@luisa.func
-def make_onb(normal: float3):
+def make_onb(normal):
     binormal = normalize(select(
         make_float3(0.0, -normal.z, normal.y),
         make_float3(-normal.y, normal.x, 0.0),
@@ -122,261 +51,242 @@ def make_onb(normal: float3):
 
 
 @luisa.func
-def generate_ray(p, resolution):
-    forward = normalize(CAMERA_LOOK_AT - CAMERA_ORIGIN)
-    right = normalize(cross(forward, make_float3(0.0, 1.0, 0.0)))
-    up = cross(right, forward)
-    fov = CAMERA_FOV * 3.1415926 / 180
-    height = 2.0 * tan(0.5 * fov)
-    width = resolution.x / resolution.y * height
-    direction = normalize(forward + (0.5 - p.x) * width * right + (0.5 - p.y) * height * up)
-    return make_ray(CAMERA_ORIGIN, direction, 0.0, 1e30)
-
-
-@luisa.func
-def cosine_sample_hemisphere(u: float2):
+def cosine_sample_hemisphere(u):
     r = sqrt(u.x)
-    phi = 2.0 * math.pi * u.y
+    phi = 2.0 * 3.1415926 * u.y
     return make_float3(r * cos(phi), r * sin(phi), sqrt(1.0 - u.x))
 
 
 @luisa.func
-def normalized_bssrdf(d: float, r: float) -> float:
-    exponent = exp(-r / (3.0 * d))
-    return (exponent + exponent * exponent * exponent) / (8 * math.pi * r * d)
+def uniform_sample_hemisphere(u):
+    r = sqrt(1.0 - u.x * u.x)
+    phi = 2.0 * 3.1415926 * u.y
+    return make_float3(r * cos(phi), r * sin(phi), u.x)
 
 
 @luisa.func
-def pdf_disk(d: float, r: float) -> float:
-    c = cdf_disk(d, r)
-    exponent = exp(-r / (3.0 * d))
-    return (exponent + exponent * exponent * exponent) * abs(c * log(c)) / (8 * math.pi * r * d)
+def uniform_sample_sphere(u):
+    cos_theta = 1.0 - 2.0 * u.x
+    sin_theta = sqrt(1.0 - cos_theta * cos_theta)
+    phi = 2.0 * 3.1415926 * u.y
+    return make_float3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta)
 
 
-@luisa.func
-def cdf_disk(d: float, r: float) -> float:
-    exponent = exp(-r / (3.0 * d))
-    return 1.0 - 0.25 * exponent * exponent * exponent - 0.75 * exponent
+luisa.init()
+model_vertex_count: int = 0
+vertex_buffer: luisa.Buffer = None
+normal_buffer: luisa.Buffer = None
+surface_light_buffer: luisa.Buffer = None
+point_light_buffer: luisa.Buffer = None
+direction_light_buffer: luisa.Buffer = None
+surface_light_count: int = 0
+point_light_count: int = 0
+direction_light_count: int = 0
+heap = luisa.BindlessArray()
+accel: luisa.Accel = luisa.Accel()
+sigma_a: float3 = make_float3(1.0)
+sigma_s: float3 = make_float3(1.0)
+eta: float = 1.0
+g: float = 0.0
+spp: int = 2400
+res = make_int2(1000, 1000)
 
 
-@luisa.func
-def invert_cdf_disk(d: float, x: float) -> float:
-    q = 4.0 * (x - 1.0)
-    x = pow(-0.5 * q + sqrt(0.25 * q * q + 1), 1 / 3) - pow(0.5 * q + sqrt(0.25 * q * q + 1), 1 / 3)
-    return -3.0 * log(x) * d
+@numba.jit
+def surface_area_kernel(triangle_array, vertex_array):
+    acc = 0.0
+    for i in range(0, len(triangle_array), 3):
+        i0, i1, i2 = triangle_array[i:i + 3]
+        p0, p1, p2 = vertex_array[i0], vertex_array[i1], vertex_array[i2]
+        acc += 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0))
+    return acc
 
 
-@luisa.func
-def fresnel_moment(eta: float) -> float:
-    eta2 = eta * eta
-    eta3 = eta2 * eta
-    eta4 = eta3 * eta
-    eta5 = eta4 * eta
-    if eta < 1:
-        return 0.45966 - 1.73965 * eta + 3.37668 * eta2 - 3.904945 * eta3 + 2.49277 * eta4 - 0.68441 * eta5
-    else:
-        return -4.61686 + 11.1136 * eta - 10.4646 * eta2 + 5.11455 * eta3 - 1.27198 * eta4 + 0.12746 * eta5
+@numba.jit
+def normal_array_kernel(triangle_array, normal_index_array, normal_vectors, vertex_num):
+    normal_array = np.empty((vertex_num, 3), dtype=np.float32)
+    for normal_index, vertex_index in zip(normal_index_array, triangle_array):
+        normal_array[vertex_index] = normal_vectors[normal_index]
+    return normal_array
 
 
-@luisa.func
-def fresnel_reflectance(cos_wi: float, eta1: float, eta2: float) -> float:
-    sin_wi = sqrt(max(0.0, 1.0 - cos_wi * cos_wi))
-    sin_wt = eta1 / eta2 * sin_wi
-    cos_wt = sqrt(max(0.0, 1.0 - sin_wt * sin_wt))
-    r_parallel = (eta2 * cos_wi - eta1 * cos_wt) / (eta2 * cos_wi + eta1 * cos_wt)
-    r_perpendicular = (eta1 * cos_wi - eta2 * cos_wt) / (eta1 * cos_wi + eta2 * cos_wt)
-    return (r_parallel * r_parallel + r_perpendicular * r_perpendicular) * 0.5
+@numba.jit
+def ccw_check_kernel(triangle_array, vertex_array, normal_array):
+    for i in range(0, len(triangle_array), 3):
+        i0, i1, i2 = triangle_array[i:i + 3]
+        p0, p1, p2 = vertex_array[i0], vertex_array[i1], vertex_array[i2]
+        n = np.cross(p1 - p0, p2 - p0)
+        if np.dot(n, normal_array[i0]) < 0:
+            triangle_array[i], triangle_array[i + 1] = i1, i0
 
 
-@luisa.func
-def fresnel_transmittance(eta: float, cos_w: float):
-    return 1.0 - fresnel_reflectance(cos_w, 1.0, eta)
+surface_area = 0.0
 
 
-@luisa.func
-def raytracing_kernel(image, accel, resolution, frame_index):
-    set_block_size(8, 8, 1)
-    coord = dispatch_id().xy
-    sampler = RandomSampler(make_int3(coord, frame_index))
-    rx = sampler.next()
-    ry = sampler.next()
-    pixel = (make_float2(coord) + make_float2(rx, ry)) / make_float2(resolution)
-    ray = generate_ray(pixel, resolution)
-    radiance = make_float3(0.0)
-    beta = make_float3(1.0)
-    pdf_bsdf = 1e30
-    pdf_light = 0.0
-    for depth in range(MAX_DEPTH):
-        # trace
-        hit = accel.trace_closest(ray)
-        if hit.miss():
-            break
-        i0 = heap.buffer_read(int, hit.inst, hit.prim * 3)
-        i1 = heap.buffer_read(int, hit.inst, hit.prim * 3 + 1)
-        i2 = heap.buffer_read(int, hit.inst, hit.prim * 3 + 2)
-        p0, p1, p2 = vertex_buffer.read(i0), vertex_buffer.read(i1), vertex_buffer.read(i2)
-        p = hit.interpolate(p0, p1, p2)
-        i0 = heap.buffer_read(int, hit.inst + mesh_num, hit.prim * 3)
-        i1 = heap.buffer_read(int, hit.inst + mesh_num, hit.prim * 3 + 1)
-        i2 = heap.buffer_read(int, hit.inst + mesh_num, hit.prim * 3 + 2)
-        n0, n1, n2 = normal_buffer.read(i0), normal_buffer.read(i1), normal_buffer.read(i2)
-        n = normalize(hit.interpolate(n0, n1, n2))
-        onb = make_onb(n)
-        cos_wo = dot(-ray.get_dir(), n)
-        if cos_wo < 0.0:
-            n = -1.0 * n
-            cos_wo *= -1.0
-        if cos_wo < 1e-4: break
-        if hit.inst != 0:
-            if depth == 0:
-                radiance += emission_buffer.read(hit.inst - 1)
-            else:
-                radiance += beta * emission_buffer.read(hit.inst - 1) / max(1e-4, pdf_bsdf)
-                # light_area = length(cross(p1 - p0, p2 - p0))
-                # pdf_light = length_squared(p - ray.get_origin()) / (light_area * cos_wo * (mesh_num - 1))
-                # mis_weight = pdf_bsdf / (pdf_light + pdf_bsdf)
-                # radiance += mis_weight * beta * emission_buffer.read(hit.inst - 1) / max(1e-4, pdf_bsdf)
-            break
-        # Sample Incident Point Using Disk CDF
-        ux, uy = 3.0 * sampler.next(), sampler.next()
-        d = D.x
-        pdf_channel = 1.0 / 3.0
-        if ux > 2.0:
-            d = D.z
-            ux -= 2.0
-        elif ux > 1.0:
-            d = D.y
-            ux -= 1.0
-        x = onb.tangent
-        y = onb.binormal
-        z = n
-        pdf_axis = 0.5
-        if ux > 0.75:
-            pdf_axis = 0.25
-            ux = 4.0 * (ux - 0.75)
-            x = onb.binormal
-            y = onb.normal
-            z = onb.tangent
-        elif ux > 0.5:
-            pdf_axis = 0.25
-            ux = 4.0 * (ux - 0.5)
-            x = onb.normal
-            y = onb.tangent
-            z = onb.binormal
+def parse_scene(filename: str):
+    with open(filename, 'r') as file:
+        scene_data = json.load(file)
+        vertex_arrays = []
+        normal_arrays = []
+        triangle_arrays = []
+        reader = tinyobjloader.ObjReader()
+        # parse the model to be rendered, add model data to array lists
+        offset = 0
+        if not reader.ParseFromFile(scene_data["render_model"]):
+            print("Failed to parse model")
+            exit(0)
         else:
-            ux = 2.0 * ux
-        if ux < 0.5:
-            z *= -1.0
-            ux *= 2.0
-        else:
-            ux = 2.0 * (ux - 0.5)
-        uz = sampler.next()
-        r_max = invert_cdf_disk(d, uz)
-        r = invert_cdf_disk(d, ux * uz)
-        theta = uy * 2.0 * math.pi
-        h = sqrt(max(0.0, r_max * r_max - r * r))
-        proj = p + z * h + x * r * cos(theta) + y * r * sin(theta)
-        proj_dir = -z
-        proj_ray = make_ray(proj, proj_dir, 0.0, 2.0 * h)
-        proj_hit = accel.trace_closest(proj_ray)
-        if proj_hit.miss() or proj_hit.inst != 0: break
-        i0 = heap.buffer_read(int, 0, proj_hit.prim * 3)
-        i1 = heap.buffer_read(int, 0, proj_hit.prim * 3 + 1)
-        i2 = heap.buffer_read(int, 0, proj_hit.prim * 3 + 2)
-        p0, p1, p2 = vertex_buffer.read(i0), vertex_buffer.read(i1), vertex_buffer.read(i2)
-        proj_p = proj_hit.interpolate(p0, p1, p2)
-        i0 = heap.buffer_read(int, mesh_num, proj_hit.prim * 3)
-        i1 = heap.buffer_read(int, mesh_num, proj_hit.prim * 3 + 1)
-        i2 = heap.buffer_read(int, mesh_num, proj_hit.prim * 3 + 2)
-        n0, n1, n2 = normal_buffer.read(i0), normal_buffer.read(i1), normal_buffer.read(i2)
-        proj_n = normalize(proj_hit.interpolate(n0, n1, n2))
-        pp = offset_ray_origin(proj_p, proj_n)
-        proj_onb = make_onb(proj_n)
-        pdf_bssrdf = 0.0
-        offset = proj_p - p
-        radius = length(cross(offset, onb.normal))
-        pdf_bssrdf += (pdf_disk(D.x, radius) + pdf_disk(D.y, radius) + pdf_disk(D.z, radius)) * abs(
-            dot(proj_n, onb.normal))
-        radius = length(cross(offset, onb.tangent))
-        pdf_bssrdf += (pdf_disk(D.x, radius) + pdf_disk(D.y, radius) + pdf_disk(D.z, radius)) * abs(
-            dot(proj_n, onb.tangent))
-        radius = length(cross(offset, onb.binormal))
-        pdf_bssrdf += (pdf_disk(D.x, radius) + pdf_disk(D.y, radius) + pdf_disk(D.z, radius)) * abs(
-            dot(proj_n, onb.binormal))
-        beta *= fresnel_transmittance(ETA, cos_wo) * DIFFUSE_ALBEDO * normalized_bssrdf(d, length(offset)) / (
-                    math.pi * (1.0 - 2.0 * fresnel_moment(1.0 / ETA)) * pdf_bssrdf * pdf_axis * pdf_channel)
-        """
-        # Sample Light
-        ux_light, uy_light = sampler.next(), sampler.next()
-        inst_light = min(mesh_num - 2, int((mesh_num - 1) * ux_light))
-        ux_light = ux_light * (mesh_num - 1) - inst_light
-        prim_light = 0
-        if ux_light > 0.5:
-            prim_light = 1
-            ux_light = 2.0 * (ux_light - 0.5)
-        else:
-            ux_light *= 2.0
-        if ux_light + uy_light > 1.0:
-            ux_light = 1.0 - ux_light
-            uy_light = 1.0 - uy_light
-        i0 = heap.buffer_read(int, inst_light + 1, prim_light * 3)
-        i1 = heap.buffer_read(int, inst_light + 1, prim_light * 3 + 1)
-        i2 = heap.buffer_read(int, inst_light + 1, prim_light * 3 + 2)
-        p0, p1, p2 = vertex_buffer.read(i0), vertex_buffer.read(i1), vertex_buffer.read(i2)
-        p_light = p0 + ux_light * (p1 - p0) + uy_light * (p2 - p0)
-        i0 = heap.buffer_read(int, inst_light + mesh_num + 1, prim_light * 3)
-        i1 = heap.buffer_read(int, inst_light + mesh_num + 1, prim_light * 3 + 1)
-        i2 = heap.buffer_read(int, inst_light + mesh_num + 1, prim_light * 3 + 2)
-        n0, n1, n2 = normal_buffer.read(i0), normal_buffer.read(i1), normal_buffer.read(i2)
-        n_light = normalize(n0 + ux_light * (n1 - n0) + uy_light * (n2 - n0))
-        pp_light = offset_ray_origin(p_light, n_light)
-        wi_light = normalize(pp_light - pp)
-        d_light = length(pp_light - pp)
-        shadow_ray = make_ray(pp, wi_light, 0.0, d_light)
-        occluded = accel.trace_any(shadow_ray)
-        cos_wi_light = dot(proj_n, wi_light)
-        cos_light = -dot(n_light, wi_light)
-        if ((not occluded and cos_wi_light > 1e-4) and cos_light > 1e-4):
-            light_area = length(cross(p1 - p0, p2 - p0))
-            pdf_light = (d_light * d_light) / (light_area * cos_light * (mesh_num - 1))
-            pdf_bsdf = cos_wi_light / math.pi
-            mis_weight = pdf_light / (pdf_light + pdf_bsdf)
-            bsdf = fresnel_transmittance(ETA, cos_wi_light)
-            emission = emission_buffer.read(inst_light)
-            radiance += beta * bsdf * mis_weight * emission * cos_wi_light / max(pdf_light, 1e-4)
-        """
-        # Sample Next Event Using Cosine Weight
-        new_direction = proj_onb.to_world(cosine_sample_hemisphere(make_float2(sampler.next(), sampler.next())))
-        cos_wi = abs(dot(proj_n, new_direction))
-        pdf_bsdf = cos_wi / math.pi
-        beta *= fresnel_transmittance(ETA, cos_wi) * cos_wi
-        ray = make_ray(pp, new_direction, 0.0, 1e30)
-        # Russian Roulette
-        if depth > MAX_DEPTH / 2:
-            l = dot(make_float3(0.212671, 0.715160, 0.072169), beta)
-            if l == 0.0:
-                break
-            q = max(l, 0.05)
-            r = sampler.next()
-            if r >= q:
-                break
-            beta *= 1.0 / q
-    if any(isnan(radiance)):
-        radiance = make_float3(0.0)
-    image.write(dispatch_id().xy, make_float4(clamp(radiance, 0.0, 30.0), 1.0))
+            print("Received model data...")
+        attrib = reader.GetAttrib()
+        global model_vertex_count
+        vertex_array = np.array(attrib.vertices, dtype=np.float32).reshape(-1, 3)
+        model_vertex_count = vertex_array.shape[0]
+        normal_vectors = np.array(attrib.normals, dtype=np.float32).reshape(-1, 3)
+        normal_index_array = np.array([
+            index.normal_index for shape in reader.GetShapes() for index in shape.mesh.indices
+        ], dtype=np.int32)
+        triangle_array = np.array([
+            index.vertex_index for shape in reader.GetShapes() for index in shape.mesh.indices
+        ], dtype=np.int32)
+        normal_array = normal_array_kernel(triangle_array, normal_index_array, normal_vectors, vertex_array.shape[0])
+        normal_array /= np.linalg.norm(normal_array, axis=1).reshape((-1, 1))
+        print("Model data parsing done...")
+        # ccw_check_kernel(triangle_array, vertex_array, normal_array)
+        vertex_arrays.append(vertex_array)
+        normal_arrays.append(normal_array)
+        global surface_area
+        surface_area = surface_area_kernel(triangle_array, vertex_array)
+        triangle_arrays.append(triangle_array)
+        # parse and upload light information
+        # add surface light data to array lists
+        offset += vertex_arrays[-1].shape[0]
+        global surface_light_buffer, direction_light_buffer, point_light_buffer
+        global surface_light_count, direction_light_count, point_light_count
+        surface_lights = []
+        for light in scene_data["surface_lights"]:
+            print("Surface light with emission: ", light["emission"])
+            reader.ParseFromFile(light["model"])
+            attrib = reader.GetAttrib()
+            vertex_array = np.array(attrib.vertices, dtype=np.float32).reshape(-1, 3)
+            normal_vectors = np.array(attrib.normals, dtype=np.float32).reshape(-1, 3)
+            normal_vectors /= np.linalg.norm(normal_vectors, axis=1).reshape(-1, 1)
+            normal_array = np.empty_like(vertex_array, dtype=np.float32)
+            for shape in reader.GetShapes():
+                for index in shape.mesh.indices:
+                    normal_array[index.vertex_index] = normal_vectors[index.normal_index]
+            surface_lights.append(DeviceSurfaceLight(emission=make_float3(*light["emission"])))
+            vertex_arrays.append(vertex_array)
+            normal_arrays.append(normal_array)
+            triangle_array = np.array([
+                index.vertex_index for shape in reader.GetShapes() for index in shape.mesh.indices
+            ]) + offset
+            print(triangle_array)
+            triangle_arrays.append(triangle_array)
+            offset += vertex_arrays[-1].shape[0]
+        surface_light_buffer = luisa.Buffer.empty(max(len(surface_lights), 1), dtype=DeviceSurfaceLight)
+        if surface_lights:
+            surface_light_buffer.copy_from_list(surface_lights)
+            surface_light_count = len(surface_lights)
+        assert len(
+            surface_lights) <= 1, "Restrict surface light number to no more than 1 to support light importance sampling"
+        direction_lights = \
+            [DeviceDirectionLight(
+                direction=make_float3(*light["direction"]),
+                emission=make_float3(*light["emission"])
+            ) for light in scene_data["direction_lights"]]
+        direction_light_buffer = luisa.Buffer.empty(max(len(direction_lights), 1), dtype=DeviceDirectionLight)
+        if direction_lights:
+            direction_light_buffer.copy_from_list(direction_lights)
+            direction_light_count = len(direction_lights)
+        point_lights = \
+            [DevicePointLight(
+                position=make_float3(*light["position"]),
+                emission=make_float3(*light["emission"])
+            ) for light in scene_data["point_lights"]]
+        point_light_buffer = luisa.Buffer.empty(max(len(point_lights), 1), dtype=DevicePointLight)
+        if point_lights:
+            point_light_buffer.copy_from_list(point_lights)
+            point_light_count = len(point_lights)
+        # combine and upload vertex && normal array lists
+        global vertex_buffer, normal_buffer
+        vertices = np.concatenate(vertex_arrays)
+        normals = np.concatenate(normal_arrays)
+        vertex_buffer = luisa.Buffer.empty(len(vertices), float3)
+        normal_buffer = luisa.Buffer.empty(len(normals), float3)
+        vertex_buffer.copy_from_array(np.hstack((vertices, np.zeros((vertices.shape[0], 1), dtype=np.float32))))
+        normal_buffer.copy_from_array(np.hstack((normals, np.zeros((normals.shape[0], 1), dtype=np.float32))))
+        # upload array lists to heap
+        global heap, accel
+        mesh_cnt = len(triangle_arrays)
+        for i in range(mesh_cnt):
+            triangle_array = triangle_arrays[i]
+            triangle_buffer = luisa.Buffer(len(triangle_array), dtype=int)
+            triangle_buffer.copy_from_array(triangle_array)
+            heap.emplace(i, triangle_buffer)
+            mesh = luisa.Mesh(vertex_buffer, triangle_buffer)
+            accel.add(mesh)
+        accel.update()
+        heap.update()
+        # parse parameters
+        global sigma_a, sigma_s, eta, g
+        sigma_a = make_float3(*scene_data["sigma_a"])
+        sigma_s = make_float3(*scene_data["sigma_s"])
+        eta = scene_data["eta"]
+        g = scene_data["g"]
+        global spp
+        spp = scene_data["spp"]
+
+
+dmfp: float3 = make_float3(0.0)
+albedo: float3 = make_float3(0.0)
+transmittance: float = 1.0
+
+
+def calculate_parameters():
+    sigma_s_prime = sigma_s * (1.0 - g)
+    sigma_t_prime = sigma_s_prime + sigma_a
+    alpha_prime = sigma_s_prime / sigma_t_prime
+    fresnel = -1.440 / eta / eta + 0.710 / eta + 0.668 + 0.0636 * eta
+    a = (1.0 + fresnel) / (1.0 - fresnel)
+    global albedo
+    albedo = 0.5 * alpha_prime * (1.0 + make_float3(
+        math.exp(-4.0 / 3.0 * a * math.sqrt(3.0 * (1.0 - alpha_prime.x))),
+        math.exp(-4.0 / 3.0 * a * math.sqrt(3.0 * (1.0 - alpha_prime.y))),
+        math.exp(-4.0 / 3.0 * a * math.sqrt(3.0 * (1.0 - alpha_prime.z)))
+    )) / (1.0 + make_float3(
+        math.sqrt(3.0 * (1.0 - alpha_prime.x)),
+        math.sqrt(3.0 * (1.0 - alpha_prime.y)),
+        math.sqrt(3.0 * (1.0 - alpha_prime.z)))
+          )
+    sigma_tr = make_float3(
+        math.sqrt(3.0 * (1.0 - alpha_prime.x)),
+        math.sqrt(3.0 * (1.0 - alpha_prime.y)),
+        math.sqrt(3.0 * (1.0 - alpha_prime.z))
+    ) * sigma_t_prime
+    s = albedo - 0.33
+    s *= s
+    s = 3.5 + 100 * s * s
+    global dmfp
+    dmfp = 1.0 / (s * sigma_tr)
+    reflectance = (1.0 - eta) / (1.0 + eta)
+    global transmittance
+    transmittance = 1.0 - reflectance * reflectance
 
 
 @luisa.func
-def accumulate_kernel(accum_image, curr_image):
-    p = dispatch_id().xy
-    accum = accum_image.read(p)
-    curr = curr_image.read(p).xyz
-    t = 1.0 / (accum.w + 1.0)
-    accum_image.write(p, make_float4(lerp(accum.xyz, curr, t), accum.w + 1.0))
+def generate_ray(frag_coord):
+    fov = 20.0 * 0.5 * math.pi / 180
+    origin = make_float3(0.0, 1.0, 8.0)
+    look_at = make_float3(0.0, 0.5, 0.0)
+    forward = normalize(look_at - origin)
+    right = normalize(cross(forward, make_float3(0.0, 1.0, 0.0)))
+    up = normalize(cross(right, forward))
+    direction = normalize((frag_coord.x * right * res.x / res.y + frag_coord.y * up) * tan(fov) + forward)
+    return make_ray(origin, direction, 1e-2, 1e10)
 
 
 @luisa.func
-def aces_tonemapping(x: float3):
+def aces_tone_mapping(x):
     a = 2.51
     b = 0.03
     c = 2.43
@@ -386,44 +296,213 @@ def aces_tonemapping(x: float3):
 
 
 @luisa.func
-def clear_kernel(image):
-    image.write(dispatch_id().xy, make_float4(0.0))
+def linear_to_srgb(x):
+    return clamp(select(1.055 * x ** (1.0 / 2.4) - 0.055,
+                        12.92 * x,
+                        x <= 0.00031308),
+                 0.0, 1.0)
 
 
 @luisa.func
-def hdr2ldr_kernel(hdr_image, ldr_image, scale: float):
-    coord = dispatch_id().xy
-    hdr = hdr_image.read(coord)
-    ldr = linear_to_srgb(hdr.xyz * scale)
-    ldr_image.write(coord, make_float4(ldr, 1.0))
+def normalized_bssrdf(r):
+    a = exp(-r / (3. * dmfp))
+    return (a + a * a * a) / (8. * math.pi * r * dmfp)
 
 
-res = 1024, 1024
-image = luisa.Texture2D(*res, 4, float)
-accum_image = luisa.Texture2D(*res, 4, float)
-ldr_image = luisa.Texture2D(*res, 4, float)
-arr = np.zeros([*res, 4], dtype=np.float32)
-frame_rate = FrameRate(10)
-w = Window("Normalized BSSRDF", res, resizable=False, frame_rate=True)
-w.set_background(arr, res)
-dpg.draw_image("background", (0, 0), res, parent="viewport_draw")
-clear_kernel(accum_image, dispatch_size=[*res, 1])
-frame_index = 0
-sample_per_pass = 32
+@luisa.func
+def pdf_disk(r):
+    a = exp(-r / (3. * dmfp))
+    a = (a + a * a * a) / (8. * math.pi * r * dmfp)
+    return (a.x + a.y + a.z) / 3.
 
 
-def update():
-    global frame_index, arr
-    for i in range(sample_per_pass):
-        raytracing_kernel(image, accel, make_int2(
-            *res), frame_index, dispatch_size=(*res, 1))
-        accumulate_kernel(accum_image, image, dispatch_size=[*res, 1])
-        frame_index += 1
-    hdr2ldr_kernel(accum_image, ldr_image, 1.0, dispatch_size=[*res, 1])
-    ldr_image.copy_to(arr)
-    frame_rate.record(sample_per_pass)
-    w.update_frame_rate(frame_rate.report())
+@luisa.func
+def cdf_disk(r):
+    a = exp(-r / (3. * dmfp))
+    return 1. - 0.25 * a * a * a - 0.75 * a
 
 
-w.run(update)
-plt.imsave("output.png", arr)
+@luisa.func
+def sample_disk(u):
+    u = 3. * u
+    if u > 2.:
+        r = dmfp.x
+        u -= 2.
+    elif u > 1.:
+        r = dmfp.y
+        u -= 1.
+    else:
+        r = dmfp.z
+    q = 4. * (u - 1.)
+    x = pow(-0.5 * q + sqrt(0.25 * q * q + 1.), 1 / 3) - pow(0.5 * q + sqrt(0.25 * q * q + 1.), 1 / 3)
+    return -3. * log(x) * r
+
+
+@luisa.func
+def balanced_heuristic(pdf_a, pdf_b):
+    k = 1.
+    t = pow(make_float2(pdf_a, pdf_b), k)
+    return t.x / max(t.x + t.y, 1e-4)
+
+
+@luisa.func
+def fresnel_schlick(c):
+    f0 = (eta - 1.) / (eta + 1.)
+    f0 *= f0
+    return 1. - lerp(f0, 1., pow(max(0., 1. - c), 5.))
+
+
+@luisa.func
+def path_tracing_kernel(canvas):
+    acc = make_float3(0.0)
+    for idx in range(spp):
+        sampler = RandomSampler(make_int3(dispatch_id().xy, idx))
+        contrib = make_float3(0.0)
+        amp = make_float3(1.0)
+        frag_coord = make_float2(dispatch_id().x + sampler.next(), dispatch_id().y + sampler.next()) / res * 2. - 1.
+        ray = generate_ray(frag_coord)
+        pdf_light = 0.0
+        pdf_bsdf = 1e30
+        for depth in range(8):
+            hit = accel.trace_closest(ray)
+            if hit.miss():
+                break
+            i0 = heap.buffer_read(int, hit.inst, hit.prim * 3)
+            i1 = heap.buffer_read(int, hit.inst, hit.prim * 3 + 1)
+            i2 = heap.buffer_read(int, hit.inst, hit.prim * 3 + 2)
+            p0 = vertex_buffer.read(i0)
+            p1 = vertex_buffer.read(i1)
+            p2 = vertex_buffer.read(i2)
+            p = hit.interpolate(p0, p1, p2)
+            n0 = normal_buffer.read(i0)
+            n1 = normal_buffer.read(i1)
+            n2 = normal_buffer.read(i2)
+            n = normalize(hit.interpolate(n0, n1, n2))
+            cos_wo = abs(dot(n, ray.get_dir()))
+            if cos_wo < 1e-4:
+                break
+            onb = make_onb(n)
+            if hit.inst == 0:
+                amp *= fresnel_schlick(cos_wo)
+                ux, uy = sampler.next(), sampler.next()
+                uy *= 2
+                onb.rotate(sampler.next() * 2. * math.pi)
+                if uy > 1.:
+                    uy -= 1.
+                    axis = n
+                elif uy > 1.:
+                    uy -= 1.
+                    axis = onb.tangent
+                else:
+                    axis = onb.binormal
+                if uy > 0.5:
+                    axis = -axis
+                    uy = 2. * uy - 1.
+                else:
+                    uy = 2. * uy
+                prev_onb = onb
+                uz = sampler.next()
+                r_max = sample_disk(uz)
+                pdf_xy = -log(ux * uz)
+                radius = sample_disk(ux * uz)
+                theta = math.pi * uy * 2.
+                height = sqrt(r_max * r_max - radius * radius)
+                local_origin = make_float3(cos(theta) * radius, sin(theta) * radius,
+                                           height)
+                onb = make_onb(axis)
+                ray = make_ray(p + onb.to_world(local_origin), -axis, 0.0, 2. * height)
+                hit = accel.trace_closest(ray)
+                if hit.miss() or hit.inst != 0:
+                    break
+                i0 = heap.buffer_read(int, hit.inst, hit.prim * 3)
+                i1 = heap.buffer_read(int, hit.inst, hit.prim * 3 + 1)
+                i2 = heap.buffer_read(int, hit.inst, hit.prim * 3 + 2)
+                p0 = vertex_buffer.read(i0)
+                p1 = vertex_buffer.read(i1)
+                p2 = vertex_buffer.read(i2)
+                offset = hit.interpolate(p0, p1, p2) - p
+                p = p + offset
+                n0 = normal_buffer.read(i0)
+                n1 = normal_buffer.read(i1)
+                n2 = normal_buffer.read(i2)
+                n = normalize(hit.interpolate(n0, n1, n2))
+                onb = make_onb(n)
+                p = offset_ray_origin(p, n)
+                bssrdf = normalized_bssrdf(length(offset))
+                pdf_bssrdf = pdf_disk(length(cross(prev_onb.normal, offset))) * abs(dot(prev_onb.normal, n)) * 0.5 + (
+                            pdf_disk(length(cross(prev_onb.tangent, offset))) * abs(
+                        dot(prev_onb.tangent, n)) + pdf_disk(length(cross(prev_onb.binormal, offset))) * abs(
+                        dot(prev_onb.binormal, n))) * 0.25
+                amp *= surface_area * albedo * bssrdf / (pdf_bssrdf * pdf_xy * math.pi)
+                ray = make_ray(p, onb.to_world(cosine_sample_hemisphere(make_float2(sampler.next(), sampler.next()))),
+                               1e-3, 1e10)
+                if surface_light_count != 0:
+                    i0 = heap.buffer_read(int, 1, 0)
+                    i1 = heap.buffer_read(int, 1, 1)
+                    i2 = heap.buffer_read(int, 1, 2)
+                    p0 = vertex_buffer.read(i0)
+                    p1 = vertex_buffer.read(i1)
+                    p2 = vertex_buffer.read(i2)
+                    ux, uy = sampler.next(), sampler.next()
+                    pp = ux * (p2 - p1) + uy * (p1 - p0) + p0
+                    pn = normalize(cross(p1 - p0, p2 - p1))
+                    light_direction = normalize(pp - p)
+                    cos_light = dot(light_direction, pn)
+                    if cos_light > 0:
+                        pn = -pn
+                    else:
+                        cos_light = -cos_light
+                    pp = offset_ray_origin(pp, pn)
+                    cos_wi_light = abs(dot(light_direction, n))
+                    if cos_wi_light > 1e-2:
+                        p_ray = make_ray(p, light_direction, 1e-2, length(pp - p))
+                        if not accel.trace_any(p_ray):
+                            area = length(cross(p1 - p0, p2 - p0))
+                            pdf_light = length_squared(pp - p) / (area * cos_light)
+                            pdf_bsdf = cos_wi_light / math.pi
+                            surface_light = surface_light_buffer.read(0)
+                            beta = amp * fresnel_schlick(cos_wi_light)
+                            mis_weight = balanced_heuristic(pdf_light, pdf_bsdf)
+                            contrib += surface_light.emission * beta * (
+                                    mis_weight * cos_wi_light * cos_light / pdf_light)
+                cos_wi = dot(n, ray.get_dir())
+                if cos_wi < 1e-2:
+                    break
+                pdf_bsdf = cos_wi / math.pi
+                amp *= fresnel_schlick(cos_wi) * cos_wi / pdf_bsdf
+            else:
+                if depth == 0:
+                    ray.set_origin(offset_ray_origin(p, ray.get_dir()))
+                    continue
+                else:
+                    surface_light = surface_light_buffer.read(hit.inst - 1)
+                    cos_light = abs(dot(n, ray.get_dir()))
+                    area = length(cross(p1 - p0, p2 - p0))
+                    pdf_light = length_squared(p - ray.get_origin()) / (area * cos_light)
+                    mis_weight = balanced_heuristic(pdf_bsdf, pdf_light)
+                    contrib += surface_light.emission * amp * (mis_weight * cos_light)
+                    break
+        if any(isnan(contrib)):
+            contrib = make_float3(0.)
+        acc += contrib
+    acc *= 1. / spp
+    color = linear_to_srgb(acc)
+    canvas.write(dispatch_id().y * res.x + dispatch_id().x, color)
+
+
+def main():
+    print("Starting to parse scene data...")
+    parse_scene(sys.argv[1])
+    print("Preparing canvas...")
+    canvas = luisa.Buffer(res.x * res.y, dtype=float3)
+    print("Calculating parameters...")
+    calculate_parameters()
+    print("Starting path tracing...")
+    path_tracing_kernel(canvas, dispatch_size=(res.x, res.y))
+    buffer = np.array([[c.x, c.y, c.z] for c in canvas.to_list()], dtype=np.float32)
+    postfix = sys.argv[1].split('/')[-1].split('\\')[-1].split('.')[0]
+    plt.imsave(f"result-teaser.png", buffer.reshape(res.x, res.y, -1)[::-1, ::-1])
+
+
+if __name__ == "__main__":
+    main()

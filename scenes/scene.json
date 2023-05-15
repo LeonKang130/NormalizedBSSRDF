@@ -1,0 +1,21 @@
+{
+    "render_model": "./resources/objects/4.obj",
+    "direction_lights": [],
+    "point_lights": [],
+    "surface_lights": [
+        {
+            "model": "./resources/lights/l4.obj",
+            "emission": [
+                77,
+                81,
+                87
+            ]
+        }
+    ],
+    "sigma_a": [0.6545, 5.7638, 0.7608],
+    "sigma_s": [1.12, 12.5412, 0.3693],
+    "g": 0.0,
+    "eta": 1.3,
+    "equation": "normalized",
+    "spp": 6400
+}
