@@ -93,16 +93,6 @@ res = make_int2(1000, 1000)
 
 
 @numba.jit
-def surface_area_kernel(triangle_array, vertex_array):
-    acc = 0.0
-    for i in range(0, len(triangle_array), 3):
-        i0, i1, i2 = triangle_array[i:i + 3]
-        p0, p1, p2 = vertex_array[i0], vertex_array[i1], vertex_array[i2]
-        acc += 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0))
-    return acc
-
-
-@numba.jit
 def normal_array_kernel(triangle_array, normal_index_array, normal_vectors, vertex_num):
     normal_array = np.empty((vertex_num, 3), dtype=np.float32)
     for normal_index, vertex_index in zip(normal_index_array, triangle_array):
@@ -118,9 +108,6 @@ def ccw_check_kernel(triangle_array, vertex_array, normal_array):
         n = np.cross(p1 - p0, p2 - p0)
         if np.dot(n, normal_array[i0]) < 0:
             triangle_array[i], triangle_array[i + 1] = i1, i0
-
-
-surface_area = 0.0
 
 
 def parse_scene(filename: str):
@@ -154,8 +141,6 @@ def parse_scene(filename: str):
         # ccw_check_kernel(triangle_array, vertex_array, normal_array)
         vertex_arrays.append(vertex_array)
         normal_arrays.append(normal_array)
-        global surface_area
-        surface_area = surface_area_kernel(triangle_array, vertex_array)
         triangle_arrays.append(triangle_array)
         # parse and upload light information
         # add surface light data to array lists
@@ -353,6 +338,25 @@ def fresnel_schlick(c):
 
 
 @luisa.func
+def collect_direct_illumination(p, n):
+    acc = make_float3(0.)
+    for i in range(point_light_count):
+        point_light = point_light_buffer.read(i)
+        light_direction = normalize(point_light.position - p)
+        ray = make_ray(p, light_direction, 1e-2, length(point_light.position - p))
+        if not accel.trace_any(ray):
+            cos_wi = max(dot(n, light_direction), 0.)
+            acc += cos_wi * point_light.emission * fresnel_schlick(cos_wi)
+    for i in range(direction_light_count):
+        direction_light = direction_light_buffer.read(i)
+        ray = make_ray(p, direction_light.direction, 1e-2, 1e10)
+        if not accel.trace_any(ray):
+            cos_wi = max(dot(n, light_direction), 0.)
+            acc += cos_wi * direction_light.emission * fresnel_schlick(cos_wi)
+    return acc
+
+
+@luisa.func
 def path_tracing_kernel(canvas):
     acc = make_float3(0.0)
     for idx in range(spp):
@@ -433,7 +437,8 @@ def path_tracing_kernel(canvas):
                             pdf_disk(length(cross(prev_onb.tangent, offset))) * abs(
                         dot(prev_onb.tangent, n)) + pdf_disk(length(cross(prev_onb.binormal, offset))) * abs(
                         dot(prev_onb.binormal, n))) * 0.25
-                amp *= surface_area * albedo * bssrdf / (pdf_bssrdf * pdf_xy * math.pi)
+                amp *= albedo * bssrdf / (pdf_bssrdf * pdf_xy * math.pi)
+                contrib += amp * collect_direct_illumination(p, n)
                 ray = make_ray(p, onb.to_world(cosine_sample_hemisphere(make_float2(sampler.next(), sampler.next()))),
                                1e-3, 1e10)
                 if surface_light_count != 0:
@@ -501,7 +506,7 @@ def main():
     path_tracing_kernel(canvas, dispatch_size=(res.x, res.y))
     buffer = np.array([[c.x, c.y, c.z] for c in canvas.to_list()], dtype=np.float32)
     postfix = sys.argv[1].split('/')[-1].split('\\')[-1].split('.')[0]
-    plt.imsave(f"result-teaser.png", buffer.reshape(res.x, res.y, -1)[::-1, ::-1])
+    plt.imsave(f"result-{postfix}.png", buffer.reshape(res.x, res.y, -1)[::-1, ::-1])
 
 
 if __name__ == "__main__":
