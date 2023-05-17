@@ -120,10 +120,6 @@ def ccw_check_kernel(triangle_array, vertex_array, normal_array):
             triangle_array[i], triangle_array[i + 1] = i1, i0
 
 
-global surface_area
-surface_area = 0.
-
-
 def parse_scene(filename: str):
     with open(filename, 'r') as file:
         scene_data = json.load(file)
@@ -151,8 +147,6 @@ def parse_scene(filename: str):
         ], dtype=np.int32)
         normal_array = normal_array_kernel(triangle_array, normal_index_array, normal_vectors, vertex_array.shape[0])
         normal_array /= np.linalg.norm(normal_array, axis=1).reshape((-1, 1))
-        global surface_area
-        surface_area = surface_kernel(triangle_array, vertex_array)
         print("Model data parsing done...")
         # ccw_check_kernel(triangle_array, vertex_array, normal_array)
         vertex_arrays.append(vertex_array)
@@ -446,9 +440,9 @@ def path_tracing_kernel(canvas):
                 p = offset_ray_origin(p, n)
                 bssrdf = normalized_bssrdf(length(offset))
                 pdf_bssrdf = pdf_disk(length(cross(prev_onb.normal, offset))) * abs(dot(prev_onb.normal, n)) * 0.5 + (
-                            pdf_disk(length(cross(prev_onb.tangent, offset))) * abs(
-                        dot(prev_onb.tangent, n)) + pdf_disk(length(cross(prev_onb.binormal, offset))) * abs(
-                        dot(prev_onb.binormal, n))) * 0.25
+                        pdf_disk(length(cross(prev_onb.tangent, offset))) * abs(
+                    dot(prev_onb.tangent, n)) + pdf_disk(length(cross(prev_onb.binormal, offset))) * abs(
+                    dot(prev_onb.binormal, n))) * 0.25
                 amp *= albedo * bssrdf / (pdf_bssrdf * pdf_xy)
                 contrib += amp * collect_direct_illumination(p, n)
                 ray = make_ray(p, onb.to_world(cosine_sample_hemisphere(make_float2(sampler.next(), sampler.next()))),
@@ -471,7 +465,7 @@ def path_tracing_kernel(canvas):
                         cos_light = -cos_light
                     pp = offset_ray_origin(pp, pn)
                     cos_wi_light = abs(dot(light_direction, n))
-                    if cos_wi_light > 1e-2:
+                    if cos_wi_light > 1e-3:
                         p_ray = make_ray(p, light_direction, 1e-2, length(pp - p))
                         if not accel.trace_any(p_ray):
                             area = length(cross(p1 - p0, p2 - p0))
@@ -483,10 +477,11 @@ def path_tracing_kernel(canvas):
                             contrib += surface_light.emission * beta * (
                                     mis_weight * cos_wi_light * cos_light / pdf_light)
                 cos_wi = dot(n, ray.get_dir())
-                if cos_wi < 1e-2:
+                if cos_wi < 1e-3:
                     break
                 pdf_bsdf = cos_wi / math.pi
-                amp *= fresnel_schlick(cos_wi) * cos_wi / pdf_bsdf
+                # amp *= fresnel_schlick(cos_wi) * cos_wi / pdf_bsdf
+                amp *= fresnel_schlick(cos_wi) * math.pi
             else:
                 if depth == 0:
                     ray.set_origin(offset_ray_origin(p, ray.get_dir()))

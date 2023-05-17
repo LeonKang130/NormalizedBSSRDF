@@ -1,5 +1,5 @@
 {
-    "render_model": "./resources/objects/3.obj",
+    "render_model": "./resources/objects/4.obj",
     "direction_lights": [],
     "point_lights": [],
     "surface_lights": [
@@ -16,5 +16,5 @@
     "sigma_s": [0.9471, 8.5516, 1.7787],
     "g": 0.0,
     "eta": 1.3,
-    "spp": 10000
+    "spp": 20000
 }
