@@ -93,6 +93,16 @@ res = make_int2(1000, 1000)
 
 
 @numba.jit
+def surface_kernel(triangle_array, vertex_array):
+    acc = 0.
+    for i in range(0, len(triangle_array), 3):
+        i0, i1, i2 = triangle_array[i:i + 3]
+        p0, p1, p2 = vertex_array[i0], vertex_array[i1], vertex_array[i2]
+        acc += 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0))
+    return acc
+
+
+@numba.jit
 def normal_array_kernel(triangle_array, normal_index_array, normal_vectors, vertex_num):
     normal_array = np.empty((vertex_num, 3), dtype=np.float32)
     for normal_index, vertex_index in zip(normal_index_array, triangle_array):
@@ -108,6 +118,10 @@ def ccw_check_kernel(triangle_array, vertex_array, normal_array):
         n = np.cross(p1 - p0, p2 - p0)
         if np.dot(n, normal_array[i0]) < 0:
             triangle_array[i], triangle_array[i + 1] = i1, i0
+
+
+global surface_area
+surface_area = 0.
 
 
 def parse_scene(filename: str):
@@ -137,6 +151,8 @@ def parse_scene(filename: str):
         ], dtype=np.int32)
         normal_array = normal_array_kernel(triangle_array, normal_index_array, normal_vectors, vertex_array.shape[0])
         normal_array /= np.linalg.norm(normal_array, axis=1).reshape((-1, 1))
+        global surface_area
+        surface_area = surface_kernel(triangle_array, vertex_array)
         print("Model data parsing done...")
         # ccw_check_kernel(triangle_array, vertex_array, normal_array)
         vertex_arrays.append(vertex_array)
@@ -224,7 +240,6 @@ def parse_scene(filename: str):
 
 dmfp: float3 = make_float3(0.0)
 albedo: float3 = make_float3(0.0)
-transmittance: float = 1.0
 
 
 def calculate_parameters():
@@ -253,9 +268,6 @@ def calculate_parameters():
     s = 3.5 + 100 * s * s
     global dmfp
     dmfp = 1.0 / (s * sigma_tr)
-    reflectance = (1.0 - eta) / (1.0 + eta)
-    global transmittance
-    transmittance = 1.0 - reflectance * reflectance
 
 
 @luisa.func
@@ -437,7 +449,7 @@ def path_tracing_kernel(canvas):
                             pdf_disk(length(cross(prev_onb.tangent, offset))) * abs(
                         dot(prev_onb.tangent, n)) + pdf_disk(length(cross(prev_onb.binormal, offset))) * abs(
                         dot(prev_onb.binormal, n))) * 0.25
-                amp *= albedo * bssrdf / (pdf_bssrdf * pdf_xy * math.pi)
+                amp *= albedo * bssrdf / (pdf_bssrdf * pdf_xy)
                 contrib += amp * collect_direct_illumination(p, n)
                 ray = make_ray(p, onb.to_world(cosine_sample_hemisphere(make_float2(sampler.next(), sampler.next()))),
                                1e-3, 1e10)
@@ -487,6 +499,15 @@ def path_tracing_kernel(canvas):
                     mis_weight = balanced_heuristic(pdf_bsdf, pdf_light)
                     contrib += surface_light.emission * amp * (mis_weight * cos_light)
                     break
+            # rr
+            luminance = dot(make_float3(0.212671, 0.715160, 0.072169), amp)
+            if luminance == 0.0:
+                break
+            q = max(luminance, 0.05)
+            r = sampler.next()
+            if r >= q:
+                break
+            beta *= 1.0 / q
         if any(isnan(contrib)):
             contrib = make_float3(0.)
         acc += contrib
