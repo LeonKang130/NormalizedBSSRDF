@@ -267,23 +267,13 @@ def calculate_parameters():
 @luisa.func
 def generate_ray(frag_coord):
     fov = 20.0 * 0.5 * math.pi / 180
-    origin = make_float3(0.0, 1.0, 8.0)
+    origin = make_float3(0.0, 1.0, -10.0)
     look_at = make_float3(0.0, 0.5, 0.0)
     forward = normalize(look_at - origin)
     right = normalize(cross(forward, make_float3(0.0, 1.0, 0.0)))
     up = normalize(cross(right, forward))
     direction = normalize((frag_coord.x * right * res.x / res.y + frag_coord.y * up) * tan(fov) + forward)
     return make_ray(origin, direction, 1e-2, 1e10)
-
-
-@luisa.func
-def aces_tone_mapping(x):
-    a = 2.51
-    b = 0.03
-    c = 2.43
-    d = 0.59
-    e = 0.14
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0)
 
 
 @luisa.func
