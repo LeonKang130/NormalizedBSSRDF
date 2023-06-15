@@ -20,3 +20,5 @@ def sample_radius(u):
 The result looks like below:
 
 ![Normalized BSSRDF](https://github.com/LeonKang130/NormalizedBSSRDF/blob/main/result-teaser.png)
+
+![Normalized BSSRDF Skin Material](https://github.com/LeonKang130/NormalizedBSSRDF/blob/main/result-teaser2.png)
